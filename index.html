@@ -313,6 +313,44 @@
     margin-top: 2px;
   }
 
+  /* ── cost table ────────────────────────────────────────────────── */
+  table.cost {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0;
+    font-family: Helvetica, Arial, sans-serif;
+    font-size: 14px;
+    background: #fffaf0;
+    border: 1px solid var(--rule);
+  }
+  table.cost th, table.cost td {
+    padding: 10px 14px;
+    border-bottom: 1px dashed var(--rule);
+    text-align: left;
+  }
+  table.cost th {
+    background: var(--paper-dark);
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-size: 11px;
+    font-weight: normal;
+  }
+  table.cost td.num {
+    font-family: "SF Mono", Menlo, monospace;
+    text-align: right;
+    white-space: nowrap;
+  }
+  table.cost tr.final td {
+    background: #f4ead5;
+    font-weight: bold;
+    color: var(--ink);
+    border-bottom: 0;
+  }
+  table.cost tr.final td.num { color: var(--good); }
+  table.cost tr.fail td { color: #8a7355; }
+  table.cost tr:last-child td { border-bottom: 0; }
+
   /* ── quality score bars ────────────────────────────────────────── */
   .score-row {
     display: grid;
@@ -743,6 +781,83 @@
     the parenthetical subtitle. These are recoverable with a second pass and will likely get to 96%+ with light
     prompt tuning.
   </div>
+
+  <!-- ── COST ──────────────────────────────────────────────────── -->
+  <h2>What it costs to run</h2>
+  <p>
+    Every AI call costs real money. The six models we tested span two orders of magnitude in price per page
+    &mdash; and, as the journey section made clear, the cheapest ones couldn't read this document reliably.
+    Prices below are approximate and based on posted API rates at the time of testing; actual costs vary with
+    document density and prompt length.
+  </p>
+
+  <table class="cost">
+    <thead>
+      <tr>
+        <th>Model</th>
+        <th style="text-align:right">Per page</th>
+        <th style="text-align:right">Per 48-page PDF</th>
+        <th>Verdict</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Claude Sonnet 4.6</td>
+        <td class="num">~$0.30</td>
+        <td class="num">~$15</td>
+        <td>Strong baseline, premium price</td>
+      </tr>
+      <tr class="fail">
+        <td>Gemini 2.5 Flash</td>
+        <td class="num">~$0.02</td>
+        <td class="num">~$1</td>
+        <td>Cheap but unreliable (capacity outages)</td>
+      </tr>
+      <tr class="fail">
+        <td>Gemini 2.5 Flash-Lite</td>
+        <td class="num">~$0.008</td>
+        <td class="num">~$0.40</td>
+        <td>Cheapest; quality collapsed on dense print</td>
+      </tr>
+      <tr class="fail">
+        <td>Cloud Vision + Claude Haiku 4.5</td>
+        <td class="num">~$0.012</td>
+        <td class="num">~$0.60</td>
+        <td>Column-reading bug in OCR output</td>
+      </tr>
+      <tr class="fail">
+        <td>Gemini 3.1 Pro Preview</td>
+        <td class="num">~$0.20</td>
+        <td class="num">~$10</td>
+        <td>Preview-tier capacity limits, no quality win</td>
+      </tr>
+      <tr class="final">
+        <td>OpenAI GPT-5.2 <em style="font-weight:normal">(final)</em></td>
+        <td class="num">~$0.25</td>
+        <td class="num">~$12</td>
+        <td>Reliable, accurate, production-ready</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout">
+    <strong>Cost is per extraction run, not ongoing.</strong> Transcribing a volume is a one-time job &mdash;
+    once the spreadsheet exists, you never rerun the AI on the same PDF. $12 to digitize a volume that would
+    take a researcher two weeks of typing is the relevant comparison, not $12 vs $0.40.
+  </div>
+
+  <p>
+    The final model is <strong>not the cheapest</strong>. It is the one that actually produced usable output
+    at acceptable reliability. Gemini Flash-Lite at $0.40 per PDF sounds unbeatable until you look at the
+    resulting spreadsheet and find that a third of the play titles are wrong, the director is misread on
+    every section break, and you can't trust any number without hand-checking it. At that point you've paid
+    $0.40 for a research artifact that is worse than having nothing, because it looks credible.
+  </p>
+  <p>
+    GPT-5.2 at $12 gives you a spreadsheet where company director and theater are 100% correct, receipts are
+    94% correct on exact numeric match, and play titles are 92% similar to a hand-typed reference. That is
+    work you can build research on.
+  </p>
 
   <!-- ── OUTPUT ────────────────────────────────────────────────── -->
   <h2>What the output looks like</h2>

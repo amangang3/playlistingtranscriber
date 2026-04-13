@@ -140,8 +140,24 @@ def validate_and_report(extracted_path: str) -> None:
     print(f"\n{'─'*W}")
     print("  2. DATE RANGE COVERAGE")
     print(f"{'─'*W}")
-    ext_dates = extracted["Performance Date"].dropna().str.strip()
-    gt_dates  = gt["Performance Date"].dropna().str.strip()
+    # Match on (Theater, Performance Date) so rows from Cruz and Príncipe
+    # never get conflated — they routinely run different plays on the same day.
+    def _norm_theater(s: pd.Series) -> pd.Series:
+        return (s.fillna("").astype(str).str.strip().str.lower()
+                 .str.replace("í", "i", regex=False))
+
+    ext_keys_df = extracted[["Theater", "Performance Date"]].dropna()
+    gt_keys_df  = gt[["Theater", "Performance Date"]].dropna()
+    ext_keys_df = ext_keys_df.assign(
+        _k_theater=_norm_theater(ext_keys_df["Theater"]),
+        _k_date=ext_keys_df["Performance Date"].astype(str).str.strip(),
+    )
+    gt_keys_df = gt_keys_df.assign(
+        _k_theater=_norm_theater(gt_keys_df["Theater"]),
+        _k_date=gt_keys_df["Performance Date"].astype(str).str.strip(),
+    )
+    ext_dates = ext_keys_df["_k_date"]
+    gt_dates  = gt_keys_df["_k_date"]
 
     # Try to extract years for a quick range summary
     import re
@@ -159,21 +175,23 @@ def validate_and_report(extracted_path: str) -> None:
     if gt_years:
         print(f"  Ground truth years: {gt_years[0]} – {gt_years[-1]}")
 
-    # Overlap
-    ext_date_set = set(ext_dates)
-    gt_date_set  = set(gt_dates)
-    matched      = ext_date_set & gt_date_set
-    only_gt      = gt_date_set  - ext_date_set
-    only_ext     = ext_date_set - gt_date_set
+    # Overlap — keyed on (theater, date) tuples
+    ext_key_set = set(zip(ext_keys_df["_k_theater"], ext_keys_df["_k_date"]))
+    gt_key_set  = set(zip(gt_keys_df["_k_theater"],  gt_keys_df["_k_date"]))
+    matched_keys = ext_key_set & gt_key_set
+    only_gt_keys = gt_key_set - ext_key_set
+    only_ext_keys = ext_key_set - gt_key_set
 
-    recall    = len(matched) / len(gt_date_set)  * 100 if gt_date_set  else 0
-    precision = len(matched) / len(ext_date_set) * 100 if ext_date_set else 0
+    recall    = len(matched_keys) / len(gt_key_set)  * 100 if gt_key_set  else 0
+    precision = len(matched_keys) / len(ext_key_set) * 100 if ext_key_set else 0
 
-    print(f"\n  Matching dates    : {len(matched):,}  "
+    print(f"\n  Matching (theater,date) : {len(matched_keys):,}  "
           f"(recall {recall:.1f}%  |  precision {precision:.1f}%)")
-    print(f"  Only in GT        : {len(only_gt):,}  (dates present in CSVs but not extracted)")
-    print(f"  Only in extracted : {len(only_ext):,}  (extracted dates not in CSVs — "
-          f"new data or misreads)")
+    print(f"  Only in GT              : {len(only_gt_keys):,}")
+    print(f"  Only in extracted       : {len(only_ext_keys):,}")
+
+    # Keep the simple flat-date sets around only for the "zero overlap" warning.
+    matched = matched_keys
 
     if not matched:
         print(
@@ -192,13 +210,13 @@ def validate_and_report(extracted_path: str) -> None:
     print(f"{'─'*W}")
     print(f"  {'Field':<32}  {'Similarity':>10}  {'Pairs':>6}  Visual")
 
-    # Build single-record lookup (first match per date)
-    gt_idx  = (gt[gt["Performance Date"].isin(matched)]
-               .drop_duplicates("Performance Date")
-               .set_index("Performance Date"))
-    ext_idx = (extracted[extracted["Performance Date"].isin(matched)]
-               .drop_duplicates("Performance Date")
-               .set_index("Performance Date"))
+    # Build (theater, date)-keyed lookups
+    gt_ann = gt.assign(_k=list(zip(_norm_theater(gt["Theater"]),
+                                    gt["Performance Date"].astype(str).str.strip())))
+    ext_ann = extracted.assign(_k=list(zip(_norm_theater(extracted["Theater"]),
+                                            extracted["Performance Date"].astype(str).str.strip())))
+    gt_idx  = gt_ann[gt_ann["_k"].isin(matched_keys)].drop_duplicates("_k").set_index("_k")
+    ext_idx = ext_ann[ext_ann["_k"].isin(matched_keys)].drop_duplicates("_k").set_index("_k")
 
     text_scores: dict[str, float] = {}
 
@@ -252,16 +270,17 @@ def validate_and_report(extracted_path: str) -> None:
         print(f"  4. WORST-FIELD EXAMPLES  ({worst_field})")
         print(f"{'─'*W}")
         examples_shown = 0
-        for date in sorted(matched):
+        for key in sorted(matched):
             if examples_shown >= 5:
                 break
             try:
-                gv = str(gt_idx.at[date,  worst_field]) if date in gt_idx.index  else ""
-                ev = str(ext_idx.at[date, worst_field]) if date in ext_idx.index else ""
+                gv = str(gt_idx.at[key,  worst_field]) if key in gt_idx.index  else ""
+                ev = str(ext_idx.at[key, worst_field]) if key in ext_idx.index else ""
                 if gv.strip() and ev.strip() and gv != "nan" and ev != "nan":
                     sc = _sim(gv, ev)
                     if sc < 0.80:
-                        print(f"  Date: {date}")
+                        theater_nm, date_str = key
+                        print(f"  {theater_nm} · {date_str}")
                         print(f"    GT : {gv[:70]}")
                         print(f"    EXT: {ev[:70]}")
                         print(f"    sim: {sc:.3f}")
@@ -325,8 +344,20 @@ def main() -> None:
     )
     parser.add_argument(
         "--api-key",
-        default=os.environ.get("GEMINI_API_KEY", ""),
-        help="Google Gemini API key (defaults to GEMINI_API_KEY env var)",
+        default=os.environ.get("OPENAI_API_KEY", ""),
+        help="OpenAI API key (defaults to OPENAI_API_KEY env var)",
+    )
+    parser.add_argument(
+        "--initial-theater", default="",
+        help='Starting theater if the PDF opens mid-section, e.g. "Teatro del Príncipe"',
+    )
+    parser.add_argument(
+        "--initial-director", default="",
+        help='Starting company director if known, e.g. "María Hidalgo"',
+    )
+    parser.add_argument(
+        "--initial-season", default="",
+        help='Starting season year if known, e.g. "1757-1758"',
     )
     parser.add_argument(
         "--out",
@@ -346,8 +377,8 @@ def main() -> None:
             parser.error("--pdf is required unless --skip-extraction is set")
         if not args.api_key:
             parser.error(
-                "A Google Gemini API key is required.\n"
-                "Set GEMINI_API_KEY or pass --api-key ..."
+                "An OpenAI API key is required.\n"
+                "Set OPENAI_API_KEY or pass --api-key ..."
             )
 
         # Import here so the script still works for --skip-extraction with no deps
@@ -377,6 +408,9 @@ def main() -> None:
             progress_callback=_progress,
             checkpoint_path=args.out.replace(".xlsx", ".checkpoint.json"),
             pages_limit=args.pages,
+            initial_theater=args.initial_theater,
+            initial_director=args.initial_director,
+            initial_season=args.initial_season,
         )
         print()  # newline after progress bar
 

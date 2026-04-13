@@ -16,8 +16,7 @@ from typing import Callable, Optional
 
 import fitz  # PyMuPDF
 import pandas as pd
-from google import genai
-from google.genai import types as genai_types
+from openai import OpenAI
 from PIL import Image
 
 logger = logging.getLogger(__name__)
@@ -362,7 +361,9 @@ def _image_to_jpeg_bytes(img: Image.Image, target_bytes: int = 4_500_000) -> byt
     raise RuntimeError("Unable to fit image under Gemini inline image budget")
 
 
-# ── Response schema for Gemini structured output ──────────────────────────────
+# ── Response schema for OpenAI structured output ──────────────────────────────
+# Strict mode requires additionalProperties=false and ALL properties in required,
+# so optional fields use empty-string as the "missing" sentinel.
 
 _RECORD_FIELDS = [
     "theater", "performance_date",
@@ -374,26 +375,23 @@ _RECORD_FIELDS = [
 ]
 
 RECORD_SCHEMA = {
-    "type": "OBJECT",
-    "properties": {k: {"type": "STRING"} for k in _RECORD_FIELDS},
-    "required": ["theater", "performance_date"],
-    "property_ordering": _RECORD_FIELDS,
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {k: {"type": "string"} for k in _RECORD_FIELDS},
+    "required": _RECORD_FIELDS,
 }
 
 RESPONSE_SCHEMA = {
-    "type": "OBJECT",
+    "type": "object",
+    "additionalProperties": False,
     "properties": {
-        "theater_detected": {"type": "STRING", "nullable": True},
-        "season_year": {"type": "STRING", "nullable": True},
-        "director_detected": {"type": "STRING", "nullable": True},
-        "section_continues_from_previous": {"type": "BOOLEAN"},
-        "records": {"type": "ARRAY", "items": RECORD_SCHEMA},
+        "theater_detected": {"type": "string"},
+        "season_year": {"type": "string"},
+        "director_detected": {"type": "string"},
+        "section_continues_from_previous": {"type": "boolean"},
+        "records": {"type": "array", "items": RECORD_SCHEMA},
     },
     "required": [
-        "theater_detected", "season_year", "director_detected",
-        "section_continues_from_previous", "records",
-    ],
-    "property_ordering": [
         "theater_detected", "season_year", "director_detected",
         "section_continues_from_previous", "records",
     ],
@@ -402,7 +400,140 @@ RESPONSE_SCHEMA = {
 
 # ── Claude API call ────────────────────────────────────────────────────────────
 
-GEMINI_MODEL = "gemini-2.5-flash"
+OPENAI_MODEL = "gpt-5.2"
+
+# Dedicated schema for the header-only pass. Strict mode compatible.
+HEADER_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "has_header": {"type": "boolean"},
+        "theater": {"type": "string"},
+        "season_year": {"type": "string"},
+        "director": {"type": "string"},
+    },
+    "required": ["has_header", "theater", "season_year", "director"],
+}
+
+_HEADER_SYSTEM = (
+    "You are looking at the TOP portion of a page from a printed 18th-century Spanish "
+    "theater directory (Cartelera Teatral Madrileña). Your job is to identify the "
+    "section header if one is visible. A section header contains:\n"
+    "  1. Theater name in large caps — TEATRO DE LA CRUZ or TEATRO DEL PRÍNCIPE\n"
+    "  2. Season year in brackets, e.g. [1757-1758] or [1762-1763]\n"
+    "  3. Company director's name on its own line below the theater, e.g. María Hidalgo, "
+    "     Joseph de Parra, Josef Martínez Gálvez, Águeda de la Calle, etc.\n"
+    "Read the director name slowly and carefully. It is printed in a smaller font than "
+    "the theater name. If no header is visible (the page continues from the previous "
+    "one), set has_header=false and return empty strings for the other fields. "
+    "Return the theater in canonical case: 'Teatro de la Cruz' or 'Teatro del Príncipe'."
+)
+
+
+def _extract_section_header(
+    client: OpenAI,
+    image: Image.Image,
+    page_index: int,
+    max_retries: int = 3,
+) -> dict:
+    """Run a focused header-detection pass on the TOP region of a page image."""
+    crop_h = int(image.height * 0.25)
+    top_crop = image.crop((0, 0, image.width, crop_h))
+    raw = _image_to_jpeg_bytes(top_crop)
+    b64 = base64.standard_b64encode(raw).decode("ascii")
+
+    messages = [
+        {"role": "system", "content": _HEADER_SYSTEM},
+        {"role": "user", "content": [
+            {"type": "text", "text": "Extract the section header, if any, from this image."},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+        ]},
+    ]
+
+    last_err: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            resp = client.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=messages,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {"name": "header", "strict": True, "schema": HEADER_SCHEMA},
+                },
+                max_completion_tokens=2048,
+            )
+            result = json.loads(resp.choices[0].message.content)
+            logger.info(
+                "Page %d header: has=%s theater=%s season=%s director=%s",
+                page_index + 1, result.get("has_header"), result.get("theater"),
+                result.get("season_year"), result.get("director"),
+            )
+            return result
+        except Exception as exc:
+            last_err = exc
+            if attempt < max_retries - 1:
+                time.sleep(2.0 * (2 ** attempt))
+    logger.warning("Page %d header detection failed: %s — falling back to no header",
+                   page_index + 1, last_err)
+    return {"has_header": False, "theater": "", "season_year": "", "director": ""}
+
+
+_LA_MISMA_RE = re.compile(
+    r"^\**\s*(la\s+misma|el\s+mismo|idem|lo\s+mismo)\b\.?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _is_la_misma(title: str) -> bool:
+    return bool(title) and bool(_LA_MISMA_RE.match(title.strip()))
+
+
+def _resolve_la_misma(records: list[dict]) -> None:
+    """Replace 'La misma' / 'El mismo' shorthand titles with the most recent
+    concrete title from the same theater+section.
+
+    Also carries the associated author/genre/acts/premiere when the previous
+    row had them filled in, since they refer to the same work.
+    """
+    # Track the last real play per (section_id, theater) for each slot
+    last: dict[tuple, dict] = {}
+    carry_fields_1 = (
+        "play_1_title", "author_1_name", "play_1_genre",
+        "play_1_acts", "play_1_premiere",
+    )
+    carry_fields_2 = (
+        "play_2_title", "author_2_name", "play_2_genre",
+        "play_2_acts", "play_2_premiere",
+    )
+
+    for rec in records:
+        key = (rec.get("_section_id", 0), rec.get("theater", ""))
+
+        # play 1
+        t1 = rec.get("play_1_title", "") or ""
+        if _is_la_misma(t1):
+            prev = last.get((key, 1))
+            if prev:
+                # Always overwrite the placeholder title; fill other fields
+                # only when blank so we don't clobber row-specific values.
+                rec["play_1_title"] = prev.get("play_1_title", "")
+                for f in carry_fields_1[1:]:
+                    if not rec.get(f):
+                        rec[f] = prev.get(f, "")
+        elif t1.strip():
+            last[(key, 1)] = {f: rec.get(f, "") for f in carry_fields_1}
+
+        # play 2
+        t2 = rec.get("play_2_title", "") or ""
+        if _is_la_misma(t2):
+            prev = last.get((key, 2))
+            if prev:
+                rec["play_2_title"] = prev.get("play_2_title", "")
+                for f in carry_fields_2[1:]:
+                    if not rec.get(f):
+                        rec[f] = prev.get(f, "")
+        elif t2.strip():
+            last[(key, 2)] = {f: rec.get(f, "") for f in carry_fields_2}
 
 
 def _canonical_theater(name: str) -> str:
@@ -418,7 +549,7 @@ def _canonical_theater(name: str) -> str:
 
 
 def _extract_page_records(
-    client: genai.Client,
+    client: OpenAI,
     image: Image.Image,
     few_shot_block: str,
     page_index: int,
@@ -426,67 +557,90 @@ def _extract_page_records(
     current_theater: str,
     current_director: str,
     current_season: str,
-    max_retries: int = 6,
+    max_retries: int = 4,
 ) -> dict:
     """
-    Send one page image to Gemini 2.5 Flash with response_schema-constrained
-    JSON output and return the parsed dict.
+    Send one page image to the OpenAI vision model with response_format=json_schema
+    and return the parsed dict.
     """
+    # ── Stage A: focused header extraction on the top 25% of the page ────────
+    header = _extract_section_header(client, image, page_index)
+    if header.get("has_header"):
+        authoritative_theater = _canonical_theater(header.get("theater", "")) or current_theater
+        authoritative_director = (header.get("director") or "").strip() or current_director
+        authoritative_season = (header.get("season_year") or "").strip() or current_season
+        header_note = (
+            "This page HAS a fresh section header at the top. It has already been parsed "
+            "for you — use these values verbatim and set section_continues_from_previous=false:"
+        )
+    else:
+        authoritative_theater = current_theater
+        authoritative_director = current_director
+        authoritative_season = current_season
+        header_note = (
+            "This page has NO fresh section header at the top — it is a continuation "
+            "of the previous section. Use these carry-forward values and set "
+            "section_continues_from_previous=true:"
+        )
+
     user_text = (
         f"Page {page_index + 1} of {total_pages}.\n"
-        f"CONTEXT FROM PREVIOUS PAGE (carry forward if this page has no new section header):\n"
-        f"  • theater  = {current_theater}\n"
-        f"  • director = {current_director}\n"
-        f"  • season   = {current_season}\n"
-        f"Set section_continues_from_previous=true if this page lacks a fresh section "
-        f"header and the records belong to the carried-forward section. In that case, "
-        f"populate each record's theater/company_director/season from the context above.\n"
-        f"If this page has its OWN section header, extract theater_detected, "
-        f"season_year, and director_detected from that header and set "
-        f"section_continues_from_previous=false.\n"
-        f"Remember: produce ONE record per performance DATE — expand multi-date play blocks.\n"
+        f"{header_note}\n"
+        f"  • theater  = {authoritative_theater}\n"
+        f"  • director = {authoritative_director}\n"
+        f"  • season   = {authoritative_season}\n"
+        f"Every record you emit MUST use these exact theater and company_director values. "
+        f"Do NOT re-read them from the image — trust the pre-parsed values above.\n"
+        f"Also echo them back in theater_detected / director_detected / season_year.\n"
+        f"If a field is blank or not applicable, return an empty string for it.\n"
+        f"Produce ONE record per performance DATE — expand multi-date play blocks.\n"
         f"{few_shot_block}"
-        "Extract all performance records from this page as structured JSON."
+        "Extract all performance records from this page."
     )
 
     raw_jpeg = _image_to_jpeg_bytes(image)
-    contents = [
-        genai_types.Part.from_bytes(data=raw_jpeg, mime_type="image/jpeg"),
-        user_text,
-    ]
+    b64 = base64.standard_b64encode(raw_jpeg).decode("ascii")
+    image_url = f"data:image/jpeg;base64,{b64}"
 
-    config = genai_types.GenerateContentConfig(
-        system_instruction=SYSTEM_PROMPT,
-        response_mime_type="application/json",
-        response_schema=RESPONSE_SCHEMA,
-        max_output_tokens=32768,
-        temperature=0.0,
-        thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
-    )
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": [
+            {"type": "text", "text": user_text},
+            {"type": "image_url", "image_url": {"url": image_url}},
+        ]},
+    ]
 
     last_err: Exception | None = None
     for attempt in range(max_retries):
         try:
-            response = client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=contents,
-                config=config,
+            response = client.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=messages,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "page_extraction",
+                        "strict": True,
+                        "schema": RESPONSE_SCHEMA,
+                    },
+                },
+                max_completion_tokens=32768,
             )
 
-            usage = getattr(response, "usage_metadata", None)
-            if usage:
-                logger.info(
-                    "Page %d usage: in=%s out=%s",
-                    page_index + 1,
-                    getattr(usage, "prompt_token_count", "?"),
-                    getattr(usage, "candidates_token_count", "?"),
-                )
+            usage = response.usage
+            logger.info(
+                "Page %d usage: in=%d out=%d finish=%s",
+                page_index + 1,
+                usage.prompt_tokens if usage else -1,
+                usage.completion_tokens if usage else -1,
+                response.choices[0].finish_reason,
+            )
 
-            text = response.text
-            if not text:
-                raise ValueError("Empty response text from Gemini")
+            content = response.choices[0].message.content
+            if not content:
+                raise ValueError("Empty response content from OpenAI")
 
-            result = json.loads(text)
+            result = json.loads(content)
 
             logger.info(
                 "Page %d: OK — %d records, theater=%s, season=%s, director=%s, continues=%s",
@@ -501,9 +655,9 @@ def _extract_page_records(
                 logger.warning("Page %d: empty records array", page_index + 1)
 
             result.setdefault("records", [])
-            result.setdefault("theater_detected", None)
-            result.setdefault("season_year", None)
-            result.setdefault("director_detected", None)
+            result.setdefault("theater_detected", "")
+            result.setdefault("season_year", "")
+            result.setdefault("director_detected", "")
             result.setdefault("section_continues_from_previous", False)
             return result
 
@@ -517,12 +671,11 @@ def _extract_page_records(
             msg = str(exc)
             retriable = any(s in msg for s in (
                 "429", "500", "502", "503", "504",
-                "RESOURCE_EXHAUSTED", "UNAVAILABLE",
-                "Connection reset", "ConnectionError",
+                "rate_limit", "overloaded", "Connection",
             ))
             if retriable and attempt < max_retries - 1:
-                wait = min(180.0, 5.0 * (3 ** attempt))
-                logger.warning("Transient error on attempt %d (%s) — sleeping %.0fs",
+                wait = min(120.0, 5.0 * (2 ** attempt))
+                logger.warning("Transient error attempt %d (%s) — sleeping %.0fs",
                                attempt + 1, exc.__class__.__name__, wait)
                 time.sleep(wait)
                 last_err = exc
@@ -593,13 +746,20 @@ def process_pdf(
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
     checkpoint_path: Optional[str] = None,
     pages_limit: Optional[int] = None,
+    initial_theater: str = "",
+    initial_director: str = "",
+    initial_season: str = "",
 ) -> pd.DataFrame:
     """
     Process a PDF and return a DataFrame of performance records.
 
     Args:
         pdf_path:           Path to the input PDF.
-        api_key:            Google Gemini API key.
+        api_key:            OpenAI API key.
+        initial_theater:    Starting theater name if the PDF opens mid-section
+                            (the opening pages have no fresh section header).
+        initial_director:   Starting company director likewise.
+        initial_season:     Starting season year likewise (e.g., "1757-1758").
         few_shot_examples:  Output of load_few_shot_examples().
         progress_callback:  Called as (current_page, total_pages, status_msg).
         checkpoint_path:    JSON file for saving/resuming progress.
@@ -608,19 +768,24 @@ def process_pdf(
     Returns:
         DataFrame with OUTPUT_COLUMNS schema.
     """
-    client = genai.Client(api_key=api_key)
+    client = OpenAI(api_key=api_key)
     few_shot_block = _format_few_shot_block(few_shot_examples)
 
-    # Resume from checkpoint if available
+    # Resume from checkpoint if available; otherwise seed from caller.
     all_records: list[dict] = []
     start_page = 0
-    current_theater = "Unknown"
-    current_director = ""
-    current_season = ""
+    current_theater = _canonical_theater(initial_theater) or "Unknown"
+    current_director = initial_director
+    current_season = initial_season
 
     if checkpoint_path:
-        (all_records, start_page, current_theater,
-         current_director, current_season) = load_checkpoint(checkpoint_path)
+        (all_records, start_page, ckpt_theater,
+         ckpt_director, ckpt_season) = load_checkpoint(checkpoint_path)
+        # Checkpoint always wins over initial_* when resuming.
+        if start_page > 0:
+            current_theater = ckpt_theater
+            current_director = ckpt_director
+            current_season = ckpt_season
 
     # Render pages
     if progress_callback:
@@ -745,6 +910,13 @@ def process_pdf(
 
     _backfill("theater", ("", "Unknown", "null"))
     _backfill("company_director", ("", "null"))
+
+    # Resolve "La misma" / "El mismo" placeholders — the cartelera uses these
+    # as shorthand when the play from previous days continues into a new month
+    # or section block. Replace them with the most recent concrete title from
+    # the same theater+section, so post-extraction rows carry the real title
+    # instead of the literal shorthand the model faithfully transcribed.
+    _resolve_la_misma(all_records)
 
     # Drop internal bookkeeping before DataFrame construction.
     for rec in all_records:

@@ -1,0 +1,7 @@
+.env
+*.pdf
+*.checkpoint.json
+__pycache__/
+*.pyc
+extractor.log
+evaluation_output.xlsx

@@ -1,0 +1,511 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cartelera Teatral Transcriber — How it works</title>
+<style>
+  :root {
+    --ink: #2a1f14;
+    --paper: #f6f0e4;
+    --paper-dark: #ece3cf;
+    --accent: #8a3a2a;
+    --accent-soft: #c46a57;
+    --rule: #cbbfa3;
+    --good: #3f7a4e;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: Georgia, "Times New Roman", serif;
+    background: var(--paper);
+    color: var(--ink);
+    line-height: 1.6;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 48px 24px 96px; }
+
+  header { text-align: center; margin-bottom: 64px; border-bottom: 2px solid var(--rule); padding-bottom: 32px; }
+  header .kicker {
+    font-family: Helvetica, Arial, sans-serif;
+    text-transform: uppercase;
+    letter-spacing: 0.2em;
+    font-size: 12px;
+    color: var(--accent);
+    margin-bottom: 12px;
+  }
+  header h1 {
+    font-size: 44px;
+    margin: 0 0 12px 0;
+    font-weight: normal;
+    letter-spacing: -0.5px;
+  }
+  header .sub {
+    font-size: 19px;
+    color: #5a4a33;
+    max-width: 620px;
+    margin: 0 auto;
+  }
+
+  h2 {
+    font-size: 28px;
+    font-weight: normal;
+    margin: 72px 0 20px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--rule);
+  }
+  h3 {
+    font-size: 20px;
+    margin: 32px 0 8px;
+    color: var(--accent);
+    font-weight: normal;
+  }
+  p { font-size: 17px; margin: 12px 0; }
+  strong { color: var(--ink); }
+
+  .callout {
+    background: var(--paper-dark);
+    border-left: 4px solid var(--accent);
+    padding: 18px 22px;
+    margin: 24px 0;
+    font-size: 16px;
+    border-radius: 2px;
+  }
+
+  /* ── pipeline strip ────────────────────────────────────────────── */
+  .pipeline {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 0;
+    margin: 40px 0;
+  }
+  .pipeline .node {
+    background: #fffaf0;
+    border: 1.5px solid var(--rule);
+    padding: 18px 10px;
+    text-align: center;
+    position: relative;
+  }
+  .pipeline .node + .node { border-left: 0; }
+  .pipeline .node::after {
+    content: "";
+    position: absolute;
+    right: -10px;
+    top: 50%;
+    width: 0;
+    height: 0;
+    transform: translateY(-50%);
+    border-top: 10px solid transparent;
+    border-bottom: 10px solid transparent;
+    border-left: 10px solid var(--rule);
+    z-index: 2;
+  }
+  .pipeline .node:last-child::after { display: none; }
+  .pipeline .num {
+    font-family: Helvetica, Arial, sans-serif;
+    font-size: 11px;
+    color: var(--accent);
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+  .pipeline .label {
+    font-size: 15px;
+    color: var(--ink);
+  }
+  @media (max-width: 720px) {
+    .pipeline { grid-template-columns: 1fr; }
+    .pipeline .node + .node { border-left: 1.5px solid var(--rule); }
+    .pipeline .node::after {
+      right: 50%;
+      top: auto;
+      bottom: -10px;
+      transform: translateX(50%);
+      border-left: 10px solid transparent;
+      border-right: 10px solid transparent;
+      border-top: 10px solid var(--rule);
+      border-bottom: 0;
+    }
+  }
+
+  /* ── step blocks ───────────────────────────────────────────────── */
+  .step {
+    display: grid;
+    grid-template-columns: 80px 1fr;
+    gap: 24px;
+    margin: 48px 0;
+    align-items: start;
+  }
+  .step .badge {
+    font-family: Helvetica, Arial, sans-serif;
+    background: var(--accent);
+    color: #fff6e5;
+    width: 64px;
+    height: 64px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 26px;
+    font-weight: bold;
+  }
+  .step .body h3 { margin-top: 0; }
+  .step .visual {
+    margin-top: 16px;
+    background: #fffaf0;
+    border: 1px solid var(--rule);
+    padding: 20px;
+    border-radius: 3px;
+  }
+
+  /* ── image transformation visuals ──────────────────────────────── */
+  .transform {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 18px;
+    flex-wrap: wrap;
+  }
+  .transform .frame {
+    background: #fff;
+    border: 1.5px solid var(--rule);
+    padding: 8px;
+    box-shadow: 2px 3px 0 rgba(42,31,20,0.08);
+  }
+  .transform .frame .inner {
+    background: repeating-linear-gradient(180deg,
+      #f4ead5 0 3px, transparent 3px 10px);
+    padding: 6px 10px;
+    font-family: Georgia, serif;
+    font-size: 9px;
+    color: #8a7355;
+    min-height: 60px;
+  }
+  .transform .arrow {
+    font-size: 22px;
+    color: var(--accent);
+  }
+  .transform .label-small {
+    font-size: 11px;
+    text-align: center;
+    color: #6a5940;
+    margin-top: 6px;
+    font-family: Helvetica, Arial, sans-serif;
+  }
+
+  .side-shot .inner { transform: rotate(90deg); }
+  .upright-shot .inner { width: 90px; }
+  .split-shot {
+    display: flex;
+    gap: 2px;
+  }
+  .split-shot .inner {
+    width: 46px;
+    border-left: 1px dashed var(--accent);
+  }
+  .split-shot .inner:first-child { border-left: 0; }
+
+  /* ── before/after record ───────────────────────────────────────── */
+  .record-pair {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    gap: 14px;
+    align-items: center;
+    margin: 18px 0;
+  }
+  .raw-image {
+    background: #fff;
+    border: 1.5px solid var(--rule);
+    padding: 10px 12px;
+    font-size: 11px;
+    font-family: Georgia, serif;
+    color: #5a4a33;
+    line-height: 1.3;
+  }
+  .raw-image .title { font-weight: bold; color: var(--ink); }
+  .raw-image .dates { letter-spacing: 1px; color: #8a6744; }
+  .raw-image .money { color: #6a5940; font-family: monospace; font-size: 10px; }
+  .record-pair .big-arrow {
+    font-size: 26px;
+    color: var(--accent);
+  }
+  .structured {
+    background: #fff;
+    border: 1.5px solid var(--rule);
+    font-size: 11px;
+    font-family: Helvetica, Arial, sans-serif;
+    overflow: hidden;
+  }
+  .structured table { width: 100%; border-collapse: collapse; }
+  .structured th, .structured td {
+    border-bottom: 1px dashed var(--rule);
+    padding: 4px 8px;
+    text-align: left;
+  }
+  .structured th {
+    background: var(--paper-dark);
+    font-weight: normal;
+    color: var(--accent);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .structured tr:last-child td { border-bottom: 0; }
+
+  /* ── two-col info ──────────────────────────────────────────────── */
+  .two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 24px;
+    margin-top: 16px;
+  }
+  .two-col .card {
+    background: #fffaf0;
+    border: 1px solid var(--rule);
+    padding: 18px 20px;
+    border-radius: 3px;
+  }
+  .two-col .card h4 {
+    margin: 0 0 6px;
+    font-size: 15px;
+    color: var(--accent);
+    font-family: Helvetica, Arial, sans-serif;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .two-col .card p { margin: 6px 0; font-size: 15px; }
+  @media (max-width: 640px) {
+    .two-col { grid-template-columns: 1fr; }
+  }
+
+  footer {
+    margin-top: 96px;
+    padding-top: 24px;
+    border-top: 2px solid var(--rule);
+    text-align: center;
+    font-size: 14px;
+    color: #6a5940;
+    font-family: Helvetica, Arial, sans-serif;
+  }
+  footer a { color: var(--accent); text-decoration: none; }
+  footer a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="kicker">Cartelera Teatral Madrileña · Automated Transcription</div>
+    <h1>Turning 270-year-old theater ledgers into a spreadsheet</h1>
+    <p class="sub">This tool reads scanned pages from an 18th-century Spanish theater record book and extracts every performance into neat rows, so historians can sort, count, and compare without typing a thing.</p>
+  </header>
+
+  <h2>The problem</h2>
+  <p>
+    Between roughly 1748 and 1800, Madrid's two main public theaters &mdash; Teatro de la Cruz and Teatro del Príncipe &mdash;
+    kept meticulous records of every play, every night: the title, the author, the company director, the
+    day of the week, and how much money came in at the door. Those records were later compiled into a
+    printed reference book called the <em>Cartelera Teatral Madrileña</em>.
+  </p>
+  <p>
+    Today those pages live in PDFs. Each page is a dense, two-column table of plays and dates, printed
+    in tiny type, with section headers, footnotes, and running lists of ticket receipts. A human researcher
+    would need <strong>weeks</strong> to type one volume into a spreadsheet by hand. This tool does it in an afternoon.
+  </p>
+
+  <div class="callout">
+    <strong>What you put in:</strong> a scanned PDF of the Cartelera.<br>
+    <strong>What you get out:</strong> an Excel file with one row per performance &mdash; 4,000 to 5,000 rows per PDF &mdash; ready to filter, sort, or feed into further analysis.
+  </div>
+
+  <h2>The pipeline at a glance</h2>
+  <p>Each PDF passes through five stages. Think of it as an assembly line.</p>
+
+  <div class="pipeline">
+    <div class="node"><div class="num">Step 1</div><div class="label">Read PDF</div></div>
+    <div class="node"><div class="num">Step 2</div><div class="label">Straighten pages</div></div>
+    <div class="node"><div class="num">Step 3</div><div class="label">Split spreads</div></div>
+    <div class="node"><div class="num">Step 4</div><div class="label">Ask the AI</div></div>
+    <div class="node"><div class="num">Step 5</div><div class="label">Write Excel</div></div>
+  </div>
+
+  <h2>How each step works</h2>
+
+  <div class="step">
+    <div class="badge">1</div>
+    <div class="body">
+      <h3>Turn each page into a high-resolution picture</h3>
+      <p>
+        The computer opens the PDF and takes a detailed snapshot of every page &mdash; roughly the
+        same resolution as a good magazine scan. This is important: the print is tiny, and a blurry picture
+        would mean the AI can't read the words.
+      </p>
+      <div class="visual transform">
+        <div>
+          <div class="frame"><div class="inner" style="width:90px">Page 1 PDF</div></div>
+          <div class="label-small">PDF page</div>
+        </div>
+        <div class="arrow">&rarr;</div>
+        <div>
+          <div class="frame"><div class="inner" style="width:100px;background:#fffaf0;border:1px solid var(--rule)">&nbsp;</div></div>
+          <div class="label-small">High-res image</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="badge">2</div>
+    <div class="body">
+      <h3>Rotate the page right-side up</h3>
+      <p>
+        Many of these old scans were saved sideways &mdash; the book was laid flat on the scanner so two pages
+        fit at once. Before the AI can read anything, the tool detects this and rotates the picture 90 degrees
+        so the text runs left to right like normal.
+      </p>
+      <div class="visual transform">
+        <div class="side-shot">
+          <div class="frame"><div class="inner">Titulo<br>1757<br>Cruz</div></div>
+          <div class="label-small">Sideways scan</div>
+        </div>
+        <div class="arrow">&rarr;</div>
+        <div class="upright-shot">
+          <div class="frame"><div class="inner">Titulo &nbsp; 1757 &nbsp; Cruz</div></div>
+          <div class="label-small">Upright, readable</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="badge">3</div>
+    <div class="body">
+      <h3>Split two-page spreads down the middle</h3>
+      <p>
+        Each scanned page is actually <em>two</em> pages from the original book sitting side by side. The tool
+        slices the image vertically so each half can be read as its own single page. This doubles the number
+        of pictures the AI has to process, but the AI can focus on one page at a time and make fewer mistakes.
+      </p>
+      <div class="visual transform">
+        <div>
+          <div class="frame"><div class="inner" style="width:140px">Left &nbsp;&nbsp;|&nbsp;&nbsp; Right</div></div>
+          <div class="label-small">One spread</div>
+        </div>
+        <div class="arrow">&rarr;</div>
+        <div>
+          <div class="frame split-shot">
+            <div class="inner">Left</div>
+            <div class="inner">Right</div>
+          </div>
+          <div class="label-small">Two separate pages</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="badge">4</div>
+    <div class="body">
+      <h3>Ask the AI to read the page and fill in a form</h3>
+      <p>
+        This is the heart of the tool. The image is sent to a modern vision AI model (Google's Gemini) along
+        with detailed instructions: <em>"You're looking at a page from an 18th-century Spanish theater record.
+        For each performance date you see, fill in this form: theater name, date, play title, author, ticket
+        receipts, director."</em>
+      </p>
+      <p>
+        The AI reads the page, understands the layout (dates on the left, titles in the middle, receipts on the right),
+        and returns a structured answer &mdash; not a paragraph of text, but a filled-out form for every single
+        performance it found. A page with one play that ran ten nights becomes ten rows, each with its own date and receipt total.
+      </p>
+      <div class="visual">
+        <div class="record-pair">
+          <div class="raw-image">
+            <div class="title">El rey don Enrique el Enfermo</div>
+            <div class="dates">07-08</div>
+            <div class="money">1449 &nbsp; 945</div>
+          </div>
+          <div class="big-arrow">&rarr;</div>
+          <div class="structured">
+            <table>
+              <tr><th>Date</th><th>Title</th><th>Receipts</th></tr>
+              <tr><td>7 Nov 1757</td><td>El rey don Enrique el Enfermo</td><td>1449</td></tr>
+              <tr><td>8 Nov 1757</td><td>El rey don Enrique el Enfermo</td><td>945</td></tr>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="badge">5</div>
+    <div class="body">
+      <h3>Remember context between pages, then save to Excel</h3>
+      <p>
+        Sections in the book span many pages. A director's name might appear once at the top of a section
+        and never again for the next twenty pages. The tool remembers this context: once it sees
+        <em>"María Hidalgo, company director"</em>, it fills that in for every following performance until a new
+        director shows up.
+      </p>
+      <p>
+        When every page is done, the tool assembles the results into an Excel spreadsheet &mdash; one row per
+        performance, tidy columns, ready to open.
+      </p>
+      <div class="visual transform">
+        <div>
+          <div class="frame"><div class="inner" style="width:90px">AI results</div></div>
+          <div class="label-small">Structured data</div>
+        </div>
+        <div class="arrow">&rarr;</div>
+        <div>
+          <div class="frame"><div class="inner" style="width:110px;background:repeating-linear-gradient(0deg,#fff 0 8px,#f4ead5 8px 9px)">&nbsp;</div></div>
+          <div class="label-small">Excel spreadsheet</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <h2>What the output looks like</h2>
+  <p>
+    One row per performance, 17 columns covering theater, date, title, author, genre, number of acts,
+    premiere date, receipts, secondary piece, director, and day of week. A typical PDF yields thousands of rows.
+  </p>
+  <div class="visual" style="background:#fffaf0;border:1px solid var(--rule);padding:20px;border-radius:3px;margin-top:18px">
+    <div class="structured" style="font-size:12px">
+      <table>
+        <tr><th>Theater</th><th>Date</th><th>Play</th><th>Director</th><th>Receipts</th></tr>
+        <tr><td>Teatro del Príncipe</td><td>7 Nov 1757</td><td>El rey don Enrique el Enfermo</td><td>María Hidalgo</td><td>1449</td></tr>
+        <tr><td>Teatro del Príncipe</td><td>8 Nov 1757</td><td>El rey don Enrique el Enfermo</td><td>María Hidalgo</td><td>945</td></tr>
+        <tr><td>Teatro del Príncipe</td><td>9 Nov 1757</td><td>La venganza en el despeño</td><td>María Hidalgo</td><td>689</td></tr>
+        <tr><td>Teatro del Príncipe</td><td>10 Nov 1757</td><td>La venganza en el despeño</td><td>María Hidalgo</td><td>504</td></tr>
+      </table>
+    </div>
+  </div>
+
+  <h2>Why this is hard</h2>
+  <div class="two-col">
+    <div class="card">
+      <h4>The print is dense</h4>
+      <p>Each page packs 80&ndash;100 performances into two tight columns of 18th-century typography. One wrong guess and a whole row slides.</p>
+    </div>
+    <div class="card">
+      <h4>The layout isn't consistent</h4>
+      <p>Section headers appear only on some pages. A play that ran ten nights gets one line and ten date numbers, which must be expanded into ten rows.</p>
+    </div>
+    <div class="card">
+      <h4>Spanish, accents, historical spelling</h4>
+      <p>Play titles use archaic Spanish spelling and accented characters. The tool is instructed to preserve them faithfully.</p>
+    </div>
+    <div class="card">
+      <h4>Quality checking</h4>
+      <p>An included evaluation script compares the AI's output against existing hand-typed records for a few test pages, so you can see how accurate the extraction really is before trusting it.</p>
+    </div>
+  </div>
+
+  <footer>
+    <p>Cartelera Teatral Transcriber &mdash; an automated pipeline for historic Spanish theater records.</p>
+  </footer>
+
+</div>
+</body>
+</html>
